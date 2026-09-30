@@ -1,0 +1,2 @@
+[console_scripts]
+pet-hospital-mcp = hospital_mcp.server:main
