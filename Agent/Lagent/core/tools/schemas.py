@@ -216,5 +216,39 @@ TOOL_SCHEMAS = [
                 "required": ["command"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetchweb",
+            "description": "获取指定网页的正文内容。通过 Python 的 subprocess 模块调用本地 curl 程序抓取网页 HTML，解析并提取正文（保留标题、段落、列表、表格和链接，去除导航栏、广告、页脚等无关内容），转换为 Markdown 格式，并将 Markdown 内容及原始 URL 返回给模型。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "需要获取的网页 URL，必须以 http:// 或 https:// 开头。"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchWeb",
+            "description": "搜索互联网上的最新信息。调用百度千帆搜索 API，接收搜索关键词或问题，返回搜索摘要及参考来源的标题和 URL，供获取和利用互联网最新信息使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "需要搜索的关键词或问题。"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]

@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import traceback
 from typing import AsyncIterator, List
 
 from .events import AssistantMessage, ErrorOccurred, ToolCall, Usage, UsageUpdate, UserMessage
@@ -114,7 +115,12 @@ class Agent:
                     )
 
                     for tc in message.tool_calls:
-                        args = json.loads(tc.function.arguments or "{}")
+                        try:
+                            args = json.loads(tc.function.arguments or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        if not isinstance(args, dict):
+                            args = {}
                         result = self._tools.dispatch(tc.function.name, args)
                         yield ToolCall(tc.function.name, args, result)
                         self.messages.append(
@@ -133,4 +139,4 @@ class Agent:
         except Exception as e:
             # 回滚本轮产生的消息，避免污染后续对话历史。
             del self.messages[base_len:]
-            yield ErrorOccurred(f"API 调用失败：{e}")
+            yield ErrorOccurred(f"API 调用失败：{e}\n{traceback.format_exc()}")

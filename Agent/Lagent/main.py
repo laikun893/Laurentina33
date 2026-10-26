@@ -20,7 +20,10 @@ def build_agent() -> Agent:
     """从配置文件与当前工作目录组装 Agent。"""
     config = load_config(CONFIG_PATH)
     llm = LLMClient(config)
-    tools = ToolService(work_root=os.getcwd())
+    tools = ToolService(
+        work_root=os.getcwd(),
+        baidu_qianfan_api_key=config.baidu_qianfan_api_key,
+    )
     return Agent(llm=llm, tools=tools, tool_schemas=TOOL_SCHEMAS)
 
 

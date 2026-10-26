@@ -7,20 +7,91 @@
 """
 
 import datetime
+import json
 import mimetypes
 import os
+import re
 import subprocess
+import urllib.error
+import urllib.request
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
+from markdownify import markdownify
 
 from ..constants import MAX_TEXT_SIZE
 from ..safety import is_text_file, run_cmd, safe_path
+
+# ----------------------------------------------------------------------
+# fetchweb 相关常量
+# ----------------------------------------------------------------------
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+_CURL_TIMEOUT = 30
+# 正文 Markdown 体积上限，超过则截断，避免占用过多上下文 Token。
+_MAX_WEB_MARKDOWN = 50 * 1024
+
+# ----------------------------------------------------------------------
+# searchWeb 相关常量
+# ----------------------------------------------------------------------
+# 百度千帆「百度搜索」API 地址。
+_SEARCH_API_URL = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+_SEARCH_TIMEOUT = 30
+_SEARCH_TOP_K = 10
+
+# 无条件移除的标签：脚本、样式、媒体、表单、图片以及页面导航等非正文结构。
+_ALWAYS_REMOVE = {
+    "script", "style", "noscript", "template", "iframe", "frame", "frameset",
+    "object", "embed", "applet", "svg", "canvas", "video", "audio", "source",
+    "link", "meta", "base", "form", "input", "button", "select", "option",
+    "textarea", "label", "fieldset", "legend", "datalist", "output",
+    "img", "picture", "map", "area", "nav", "aside", "footer",
+}
+
+# 按 class / id 匹配的无关内容关键词（导航、广告、分享、评论区、弹窗等）。
+_NOISE_PATTERN = re.compile(
+    r"nav|menu|navbar|breadcrumb|crumb|pagination|pager|sidebar|side-bar|"
+    r"footer|ad|ads|advert|advertisement|adslot|sponsor|sponsored|promo|"
+    r"promotion|banner|share|social|sharing|comment|comments|related|"
+    r"recommend|newsletter|subscribe|subscription|cookie|consent|popup|"
+    r"modal|dialog|overlay|toast|search|signup|signin|login|register|"
+    r"account|avatar|author-bio|bio|print|toolbar|widget|hidden|skip-link|"
+    r"jump-link|sr-only|screen-reader|visually-hidden",
+    re.IGNORECASE,
+)
+
+# curl 常见退出码的中文说明，用于给出更友好的错误提示。
+_CURL_ERRORS = {
+    1: "不支持的协议",
+    3: "URL 格式错误",
+    5: "无法解析代理",
+    6: "无法解析主机名",
+    7: "无法连接到服务器",
+    18: "传输被中断",
+    22: "服务器返回 HTTP 错误",
+    26: "读取文件失败",
+    28: "操作超时",
+    35: "SSL/TLS 握手失败",
+    47: "重定向次数过多",
+    52: "服务器无响应",
+    56: "接收数据失败",
+}
+
+
+class WebFetchError(Exception):
+    """网页抓取 / 解析过程中的错误。"""
 
 
 class ToolService:
     """文件操作工具服务。"""
 
-    def __init__(self, work_root, max_text_size=MAX_TEXT_SIZE):
+    def __init__(self, work_root, max_text_size=MAX_TEXT_SIZE,
+                 baidu_qianfan_api_key=""):
         self.work_root = os.path.abspath(work_root)
         self.max_text_size = max_text_size
+        self.baidu_qianfan_api_key = (baidu_qianfan_api_key or "").strip()
 
     # ------------------------------------------------------------------
     # 分发
@@ -61,6 +132,10 @@ class ToolService:
             )
         if name == "execCommand":
             return self.exec_command(arguments.get("command", ""))
+        if name == "fetchweb":
+            return self.fetch_web(arguments.get("url"))
+        if name == "searchWeb":
+            return self.search_web(arguments.get("query"))
         return f"未知的工具：{name}"
 
     # ------------------------------------------------------------------
@@ -245,3 +320,278 @@ class ToolService:
             parts.append("[stderr] " + proc.stderr.rstrip())
         out = "\n".join(parts) if parts else "(无输出)"
         return f"退出码：{proc.returncode}\n{out}"
+
+    def fetch_web(self, url):
+        if not url or not url.strip():
+            return "错误：URL 不能为空"
+        url = url.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return f"错误：URL 必须以 http:// 或 https:// 开头：{url}"
+
+        try:
+            html_bytes = _download_page(url)
+            markdown = _html_to_main_markdown(html_bytes, url)
+        except WebFetchError as e:
+            return f"错误：{e}"
+
+        return f"原始 URL：{url}\n\n{markdown}"
+
+    def search_web(self, query):
+        """调用百度千帆「百度搜索」API，返回搜索摘要与来源信息。"""
+        if not query or not query.strip():
+            return "错误：搜索关键词不能为空"
+        query = query.strip()
+
+        if not self.baidu_qianfan_api_key:
+            return (
+                "错误：未配置百度千帆 API Key，"
+                "请在 config.ini 的 [search] 小节中设置 baidu_qianfan_api_key"
+            )
+
+        payload = json.dumps(
+            {
+                "messages": [{"role": "user", "content": query}],
+                "search_source": "baidu_search_v2",
+                "resource_type_filter": [{"type": "web", "top_k": _SEARCH_TOP_K}],
+            }
+        ).encode("utf-8")
+
+        request = urllib.request.Request(
+            _SEARCH_API_URL,
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.baidu_qianfan_api_key}",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=_SEARCH_TIMEOUT) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            return self._search_error_detail(
+                f"搜索请求失败（HTTP {e.code}）", e.read()
+            )
+        except urllib.error.URLError as e:
+            return f"错误：网络请求失败：{e.reason}"
+        except OSError as e:
+            return f"错误：网络请求失败：{e}"
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            return f"错误：搜索响应解析失败：{e}"
+
+        if not isinstance(data, dict):
+            return "错误：搜索响应格式异常"
+
+        references = data.get("references")
+        if references is None:
+            code = data.get("code")
+            message = data.get("message") or data.get("error_msg") or "未知错误"
+            return f"错误：搜索 API 返回错误（code={code}）：{message}"
+
+        if not isinstance(references, list) or not references:
+            return f"错误：未获取到任何搜索结果：{query}"
+
+        return self._format_search_results(query, references)
+
+    # ------------------------------------------------------------------
+    # searchWeb 辅助方法
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _search_error_detail(prefix, body):
+        """尝试从错误响应体中解析 code/message，拼接出更清晰的错误信息。"""
+        detail = ""
+        if body:
+            try:
+                err = json.loads(body.decode("utf-8", errors="replace"))
+                code = err.get("code")
+                message = err.get("message") or err.get("error_msg")
+                if code is not None or message:
+                    detail = f"（code={code}）{message or ''}"
+            except (ValueError, UnicodeDecodeError):
+                detail = body.decode("utf-8", errors="replace").strip()[:200]
+        if not detail:
+            detail = body.decode("utf-8", errors="replace").strip()[:200] if body else "未知错误"
+        return f"错误：{prefix}：{detail}".strip()
+
+    @staticmethod
+    def _format_search_results(query, references):
+        """将搜索结果整理为可读文本：摘要 + 标题 + URL。"""
+        lines = [f"搜索关键词：{query}", f"共 {len(references)} 条结果：", ""]
+        for idx, ref in enumerate(references, start=1):
+            if not isinstance(ref, dict):
+                continue
+            title = ref.get("title") or "(无标题)"
+            url = ref.get("url") or ""
+            snippet = (ref.get("snippet") or ref.get("content") or "").strip()
+            website = ref.get("website") or ""
+            lines.append(f"[{idx}] {title}")
+            if website:
+                lines.append(f"    来源：{website}")
+            if url:
+                lines.append(f"    URL：{url}")
+            if snippet:
+                lines.append(f"    摘要：{snippet}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+
+# ----------------------------------------------------------------------
+# fetchweb 辅助函数（模块级，纯函数，便于测试）
+# ----------------------------------------------------------------------
+def _download_page(url):
+    """使用本地 curl 程序抓取网页，返回原始响应字节（未经文本解码）。
+
+    采用参数列表方式调用 subprocess，不使用 shell=True，避免命令注入。
+    """
+    cmd = [
+        "curl",
+        "-sSL",
+        "--compressed",
+        "--max-time", str(_CURL_TIMEOUT),
+        "-A", _USER_AGENT,
+        url,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=_CURL_TIMEOUT + 10,
+        )
+    except FileNotFoundError:
+        raise WebFetchError("未找到 curl 程序，请确认已安装 curl 并加入 PATH")
+    except subprocess.TimeoutExpired:
+        raise WebFetchError(f"获取网页超时（超过 {_CURL_TIMEOUT} 秒）")
+    except OSError as e:
+        raise WebFetchError(f"调用 curl 失败：{e}")
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        stdout = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        detail = stderr or stdout or "未知错误"
+        reason = _CURL_ERRORS.get(proc.returncode)
+        if reason:
+            raise WebFetchError(
+                f"获取网页失败（{reason}，退出码 {proc.returncode}）：{detail}"
+            )
+        raise WebFetchError(f"获取网页失败（退出码 {proc.returncode}）：{detail}")
+
+    return proc.stdout
+
+
+def _html_to_main_markdown(html_bytes, url):
+    """将网页 HTML 解析并提取正文，转换为 Markdown 文本。"""
+    if not html_bytes or not html_bytes.strip():
+        raise WebFetchError("网页返回内容为空")
+
+    try:
+        soup = BeautifulSoup(html_bytes, "html.parser")
+    except Exception as e:
+        raise WebFetchError(f"HTML 解析失败：{e}")
+
+    if soup.find() is None:
+        raise WebFetchError("返回内容不是有效的 HTML 文档")
+
+    main = _find_main(soup)
+    if main is None:
+        raise WebFetchError("无法定位网页正文")
+
+    _clean(main)
+    _resolve_links(main, url)
+
+    try:
+        markdown = markdownify(str(main), heading_style="ATX")
+    except Exception as e:
+        raise WebFetchError(f"Markdown 转换失败：{e}")
+
+    markdown = _tidy_markdown(markdown)
+    if not markdown:
+        raise WebFetchError("网页正文为空，无法提取有效内容")
+
+    if len(markdown) > _MAX_WEB_MARKDOWN:
+        markdown = markdown[:_MAX_WEB_MARKDOWN] + "\n\n…（内容过长，已截断）"
+
+    return markdown
+
+
+def _find_main(soup):
+    """定位正文容器：优先语义标签，其次按内容量启发式挑选。"""
+    body = soup.body or soup
+
+    role_main = body.find(attrs={"role": re.compile(r"^main$", re.IGNORECASE)})
+    for node in (body.find("main"), body.find("article"), role_main):
+        if node is not None and _has_substantial_text(node):
+            return node
+
+    best, best_score = None, 0.0
+    for node in body.find_all(["div", "section", "article", "main"]):
+        score = _content_score(node)
+        if score > best_score:
+            best, best_score = node, score
+
+    return best if best is not None else body
+
+
+def _content_score(node):
+    """为容器打分：文本越长、块级标签越多、链接密度越低，得分越高。"""
+    text = node.get_text(" ", strip=True)
+    length = len(text)
+    if length < 80:
+        return 0.0
+    block_tags = node.find_all(
+        ["p", "pre", "blockquote", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+         "td", "th", "dt", "dd"]
+    )
+    link_text = sum(len(a.get_text(" ", strip=True)) for a in node.find_all("a"))
+    density = link_text / length if length else 1.0
+    return length + len(block_tags) * 25 - density * length
+
+
+def _has_substantial_text(node):
+    return node is not None and len(node.get_text(" ", strip=True)) >= 50
+
+
+def _clean(node):
+    """移除正文容器内的脚本、媒体、表单以及导航 / 广告等无关元素。"""
+    for el in list(node.find_all(True)):
+        if (el.name or "").lower() in _ALWAYS_REMOVE:
+            el.decompose()
+            continue
+        id_text = el.get("id") or ""
+        class_text = " ".join(el.get("class") or [])
+        if _NOISE_PATTERN.search(id_text) or _NOISE_PATTERN.search(class_text):
+            el.decompose()
+
+
+def _resolve_links(node, base_url):
+    """将正文中的相对链接解析为绝对链接，去掉 javascript 等无效链接。"""
+    for a in node.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.lower().startswith(
+            ("javascript:", "data:", "mailto:", "tel:", "#")
+        ):
+            a.unwrap()
+            continue
+        try:
+            a["href"] = urljoin(base_url, href)
+        except ValueError:
+            a.unwrap()
+
+
+def _tidy_markdown(text):
+    """统一换行符并折叠多余空行，压缩 Markdown 体积。"""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines, prev_blank = [], False
+    for line in text.split("\n"):
+        stripped = line.rstrip()
+        if not stripped:
+            if not prev_blank:
+                lines.append("")
+            prev_blank = True
+        else:
+            lines.append(stripped)
+            prev_blank = False
+    return "\n".join(lines).strip()

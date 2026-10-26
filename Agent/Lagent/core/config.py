@@ -20,6 +20,7 @@ class Config:
     base_url: str
     model: str
     api_key: str
+    baidu_qianfan_api_key: str = ""
 
 
 def load_config(path) -> Config:
@@ -42,4 +43,17 @@ def load_config(path) -> Config:
     except configparser.NoOptionError as e:
         raise ConfigError(f"配置文件缺少字段 {e.option}") from e
 
-    return Config(base_url=base_url, model=model, api_key=api_key)
+    # 搜索能力为可选功能：未配置 [search] 段或对应字段时，返回空串，
+    # 由上层在调用 searchWeb 时给出清晰的错误提示。
+    baidu_qianfan_api_key = ""
+    if parser.has_section("search"):
+        baidu_qianfan_api_key = parser.get(
+            "search", "baidu_qianfan_api_key", fallback=""
+        )
+
+    return Config(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        baidu_qianfan_api_key=baidu_qianfan_api_key,
+    )
