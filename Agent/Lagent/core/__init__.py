@@ -14,6 +14,7 @@ from .agent import Agent
 from .config import Config, ConfigError, load_config
 from .events import Usage, UsageUpdate
 from .llm import LLMClient
+from .skills import Skill, build_system_prompt, discover_skills
 from .tools import TOOL_SCHEMAS, ToolService
 
 __all__ = [
@@ -22,8 +23,11 @@ __all__ = [
     "ConfigError",
     "load_config",
     "LLMClient",
+    "Skill",
     "TOOL_SCHEMAS",
     "ToolService",
     "Usage",
     "UsageUpdate",
+    "build_system_prompt",
+    "discover_skills",
 ]

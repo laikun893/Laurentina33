@@ -203,6 +203,28 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "RunCil",
+            "description": "执行本地已安装的任意命令行程序（CLI），返回标准输出、标准错误和退出码，供判断执行结果并决定下一步操作。命令以参数列表方式（shell=False）调用，不支持管道、重定向等 Shell 语法，各参数需拆分后按顺序放入 args 列表逐个传入。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "需要执行的程序名称，例如 git、python、curl、node。该程序必须已安装并加入 PATH。"
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "传给程序的参数列表，按顺序逐个传入，例如 [\"--version\"] 或 [\"status\", \"--short\"]。可选，不填则不带参数执行。"
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "execCommand",
             "description": "执行一条任意的本地命令（Windows cmd 命令），返回标准输出、标准错误和退出码。支持管道和重定向等 shell 语法。",
             "parameters": {
@@ -248,6 +270,27 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "loadSkill",
+            "description": "加载指定技能（Skill）的完整指令或其附件文件内容。仅传入 name 时返回该技能的 SKILL.md 全文；同时传入 filename 时读取该技能目录下的指定附件文件，不重复加载 SKILL.md。filename 支持相对 Skill 目录的路径、项目相对路径、绝对路径或仅文件名。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "需要加载的技能名称。"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "可选，需要加载的技能附件文件路径或文件名。不填则加载 SKILL.md 全文。"
+                    }
+                },
+                "required": ["name"]
             }
         }
     }

@@ -50,6 +50,18 @@ class Agent:
     def work_root(self) -> str:
         return self._tools.work_root
 
+    @property
+    def tool_count(self) -> int:
+        return len(self._tool_schemas)
+
+    @property
+    def tool_names(self) -> List[str]:
+        """已注册工具的名称列表（供前端展示）。"""
+        return [
+            s.get("function", {}).get("name", "")
+            for s in self._tool_schemas
+        ]
+
     def reset(self):
         """清空对话历史与累计消耗（保留系统提示词）。"""
         self.messages = self._build_history()

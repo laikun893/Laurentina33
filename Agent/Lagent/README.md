@@ -69,7 +69,9 @@ pip install -r requirements.txt
 python main.py
 ```
 
-- 输入提示词后回车发送；`Ctrl+C` 退出。
+- 输入提示词后回车发送；`Ctrl+C` 退出，`Ctrl+L` 清屏。
+- 输入 `/help` 查看内置命令（`/clear`、`/model`、`/tools`、`/quit`）。
+- 底部状态栏实时显示运行状态、工具数与累计 token 消耗。
 - 沙箱根目录为启动时的当前工作目录，所有文件操作都被限制在其中。
 
 ## 如何扩展其它前端（Web / Desktop）

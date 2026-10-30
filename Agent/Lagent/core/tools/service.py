@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-from ..constants import MAX_TEXT_SIZE
+from ..constants import COMMAND_TIMEOUT, MAX_COMMAND_OUTPUT, MAX_TEXT_SIZE
 from ..safety import is_text_file, run_cmd, safe_path
 
 # ----------------------------------------------------------------------
@@ -88,10 +88,11 @@ class ToolService:
     """文件操作工具服务。"""
 
     def __init__(self, work_root, max_text_size=MAX_TEXT_SIZE,
-                 baidu_qianfan_api_key=""):
+                 baidu_qianfan_api_key="", skills=None):
         self.work_root = os.path.abspath(work_root)
         self.max_text_size = max_text_size
         self.baidu_qianfan_api_key = (baidu_qianfan_api_key or "").strip()
+        self._skills = {s.name: s for s in (skills or [])}
 
     # ------------------------------------------------------------------
     # 分发
@@ -132,10 +133,18 @@ class ToolService:
             )
         if name == "execCommand":
             return self.exec_command(arguments.get("command", ""))
+        if name == "RunCil":
+            return self.run_cil(
+                arguments.get("command", ""), arguments.get("args")
+            )
         if name == "fetchweb":
             return self.fetch_web(arguments.get("url"))
         if name == "searchWeb":
             return self.search_web(arguments.get("query"))
+        if name == "loadSkill":
+            return self.load_skill(
+                arguments.get("name"), arguments.get("filename")
+            )
         return f"未知的工具：{name}"
 
     # ------------------------------------------------------------------
@@ -321,6 +330,63 @@ class ToolService:
         out = "\n".join(parts) if parts else "(无输出)"
         return f"退出码：{proc.returncode}\n{out}"
 
+    def run_cil(self, command, args=None):
+        """执行本地已安装的任意命令行程序。
+
+        以参数列表方式（shell=False）调用 subprocess，不拼接 Shell 命令字符串，
+        从而规避命令注入风险。命令以运行 Lagent 的当前用户权限执行，
+        本教学阶段不实现命令白名单、黑名单或审批机制，仅限受控实验环境使用。
+        """
+        if not command or not command.strip():
+            return "错误：命令不能为空"
+        command = command.strip()
+
+        argv = [command]
+        if args is None:
+            pass
+        elif isinstance(args, (list, tuple)):
+            argv.extend(str(a) for a in args)
+        elif isinstance(args, str):
+            argv.append(args)
+        else:
+            return "错误：参数 args 必须是字符串列表"
+
+        try:
+            proc = subprocess.run(
+                argv,
+                shell=False,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=COMMAND_TIMEOUT,
+            )
+        except FileNotFoundError:
+            return f"错误：未找到命令 {command}，请确认程序已安装并加入 PATH"
+        except subprocess.TimeoutExpired:
+            return f"错误：命令执行超时（超过 {COMMAND_TIMEOUT} 秒），已终止：{command}"
+        except OSError as e:
+            return f"错误：执行命令失败：{e}"
+
+        stdout = self._truncate_output(proc.stdout or "", MAX_COMMAND_OUTPUT, "stdout")
+        stderr = self._truncate_output(proc.stderr or "", MAX_COMMAND_OUTPUT, "stderr")
+
+        parts = [f"退出码：{proc.returncode}", "[stdout]"]
+        parts.append(stdout if stdout else "(无输出)")
+        if stderr:
+            parts.append("[stderr]")
+            parts.append(stderr)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _truncate_output(text, limit, stream_name):
+        """截断过长输出并在末尾标明截断情况。"""
+        if len(text) <= limit:
+            return text
+        return (
+            text[:limit]
+            + f"\n\n……[{stream_name} 输出过长，已截断：显示 {limit} / 共 {len(text)} 字符]"
+        )
+
     def fetch_web(self, url):
         if not url or not url.strip():
             return "错误：URL 不能为空"
@@ -396,6 +462,99 @@ class ToolService:
             return f"错误：未获取到任何搜索结果：{query}"
 
         return self._format_search_results(query, references)
+
+    # ------------------------------------------------------------------
+    # loadSkill 工具与辅助方法
+    # ------------------------------------------------------------------
+    def load_skill(self, name, filename=None):
+        """加载指定 Skill 的 SKILL.md 全文或其附件文件。"""
+        if not name or not name.strip():
+            return "错误：Skill 名称不能为空"
+        name = name.strip()
+        skill = self._skills.get(name)
+        if skill is None:
+            return f"错误：未找到技能：{name}"
+
+        if not filename or not filename.strip():
+            return self._read_skill_file(skill.skills_md_path)
+
+        return self._load_skill_attachment(skill, filename.strip())
+
+    def _read_skill_file(self, path):
+        """读取 Skill 目录内的一个纯文本文件，返回正文。"""
+        if not os.path.isfile(path):
+            return f"错误：文件不存在：{path}"
+        size = os.path.getsize(path)
+        if size > self.max_text_size:
+            return (
+                f"错误：文件过大（{size} 字节），超过限制 "
+                f"{self.max_text_size} 字节，拒绝读取"
+            )
+        ok, why = is_text_file(path)
+        if not ok:
+            return f"错误：仅支持纯文本文件，{why}"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except OSError as e:
+            return f"错误：读取失败：{e}"
+
+    def _load_skill_attachment(self, skill, filename):
+        """按精确路径优先、文件名兜底的顺序解析并读取附件。"""
+        # 1. 相对 Skill 目录的路径
+        candidate = os.path.join(skill.dir_path, filename)
+        if os.path.isfile(candidate) and self._is_within(skill.dir_path, candidate):
+            return self._read_skill_file(candidate)
+
+        # 2. 项目相对路径
+        candidate = os.path.join(self.work_root, filename)
+        if os.path.isfile(candidate) and self._is_within(skill.dir_path, candidate):
+            return self._read_skill_file(candidate)
+
+        # 3. 绝对路径
+        if os.path.isabs(filename):
+            if not self._is_within(skill.dir_path, filename):
+                return (
+                    f"错误：路径越界，禁止访问技能 {skill.name} "
+                    f"目录之外的文件：{filename}"
+                )
+            if os.path.isfile(filename):
+                return self._read_skill_file(filename)
+            return f"错误：文件不存在：{filename}"
+
+        # 4. 仅提供文件名时，递归搜索该 Skill 目录
+        matches = self._find_in_skill(skill.dir_path, os.path.basename(filename))
+        if len(matches) == 1:
+            return self._read_skill_file(matches[0])
+        if len(matches) > 1:
+            rel_paths = [os.path.relpath(m, skill.dir_path) for m in matches]
+            candidates = "\n".join(f"- {p}" for p in rel_paths)
+            return (
+                f"错误：存在多个同名文件，请指定具体路径（相对 Skill 目录）：\n"
+                f"{candidates}"
+            )
+        return f"错误：在技能 {skill.name} 目录中未找到文件：{filename}"
+
+    @staticmethod
+    def _is_within(root, path):
+        """校验 path 解析后仍位于 root 目录内。"""
+        root_real = os.path.realpath(root)
+        path_real = os.path.realpath(path)
+        try:
+            common = os.path.commonpath([root_real, path_real])
+        except ValueError:
+            return False
+        return common == root_real
+
+    @staticmethod
+    def _find_in_skill(root, filename):
+        """递归查找 root 目录下所有名为 filename 的文件。"""
+        matches = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if fn == filename:
+                    matches.append(os.path.join(dirpath, fn))
+        return matches
 
     # ------------------------------------------------------------------
     # searchWeb 辅助方法
