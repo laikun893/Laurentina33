@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "Bazi-MCP": {
+      "type": "streamable_http",
+      "url": "https://mcp.api-inference.modelscope.net/cf242c2cd2bd47/mcp"
+    },
+    "pet-hospital-mcp": {
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8301/mcp"
+    },
+    "Anythingllm-MCP": {
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
